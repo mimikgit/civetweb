@@ -20,6 +20,8 @@
  * THE SOFTWARE.
  */
 
+#define NO_HTTPS_SERVER   //only work as http server not https server
+
 #if defined(_WIN32)
 #if !defined(_CRT_SECURE_NO_WARNINGS)
 #define _CRT_SECURE_NO_WARNINGS /* Disable deprecation warning in VS2005 */
@@ -13478,6 +13480,7 @@ initialize_ssl(char *ebuf, size_t ebuf_len)
 }
 
 #ifdef MEMORY_CERTIFICATE
+#undef NO_HTTPS_SERVER
 static int ssl_use_pem_chain_memory(SSL_CTX *ctx, BIO *in)
 {
     X509 *x = NULL;
@@ -13730,10 +13733,12 @@ set_ssl_option(struct mg_context *ctx)
 	if (!ctx) {
 		return 0;
 	}
+#ifdef NO_HTTPS_SERVER
 	if ((pem = ctx->config[SSL_CERTIFICATE]) == NULL
 	    && ctx->callbacks.init_ssl == NULL) {
 		return 1;
 	}
+#endif
 	chain = ctx->config[SSL_CERTIFICATE_CHAIN];
 	if (chain == NULL) {
 		chain = pem;
@@ -15679,6 +15684,11 @@ accept_new_connection(const struct socket *listener, struct mg_context *ctx)
 			       __func__,
 			       strerror(ERRNO));
 		}
+
+#if defined(SO_NOSIGPIPE)
+                int val = 1;
+                setsockopt(so.sock, SOL_SOCKET, SO_NOSIGPIPE, (void *)&val, sizeof(int));
+#endif
 
 		/* Disable TCP Nagle's algorithm. Normally TCP packets are coalesced
 		 * to effectively fill up the underlying IP packet payload and
