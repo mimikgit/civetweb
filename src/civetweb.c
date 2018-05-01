@@ -45,7 +45,7 @@
 #endif
 #else
 #if defined(__GNUC__) && !defined(_GNU_SOURCE)
-#define _GNU_SOURCE /* for setgroups() */
+#define _GNU_SOURCE /* for setgroups(), pthread_setname_np() */
 #endif
 #if defined(__linux__) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 600 /* For flockfile() on Linux */
@@ -347,17 +347,71 @@ _civet_safe_clock_gettime(int clk_id, struct timespec *t)
 #include <stdio.h>
 #include <stdint.h>
 
+/********************************************************************/
+/* CivetWeb configuration defines */
+/********************************************************************/
+
+/* Maximum number of threads that can be configured.
+ * The number of threads actually created depends on the "num_threads"
+ * configuration parameter, but this is the upper limit. */
+#if !defined(MAX_WORKER_THREADS)
+#define MAX_WORKER_THREADS (1024 * 64) /* in threads (count) */
+#endif
+
+/* Timeout interval for select/poll calls.
+ * The timeouts depend on "*_timeout_ms" configuration values, but long
+ * timeouts are split into timouts as small as SOCKET_TIMEOUT_QUANTUM.
+ * This reduces the time required to stop the server. */
+#if !defined(SOCKET_TIMEOUT_QUANTUM)
+#define SOCKET_TIMEOUT_QUANTUM (2000) /* in ms */
+#endif
+
+/* Do not try to compress files smaller than this limit. */
+#if !defined(MG_FILE_COMPRESSION_SIZE_LIMIT)
+#define MG_FILE_COMPRESSION_SIZE_LIMIT (1024) /* in bytes */
+#endif
+
+#if !defined(PASSWORDS_FILE_NAME)
+#define PASSWORDS_FILE_NAME ".htpasswd"
+#endif
+
+/* Initial buffer size for all CGI environment variables. In case there is
+ * not enough space, another block is allocated. */
+#if !defined(CGI_ENVIRONMENT_SIZE)
+#define CGI_ENVIRONMENT_SIZE (4096) /* in bytes */
+#endif
+
+/* Maximum number of environment variables. */
+#if !defined(MAX_CGI_ENVIR_VARS)
+#define MAX_CGI_ENVIR_VARS (256) /* in variables (count) */
+#endif
+
+/* General purpose buffer size. */
+#if !defined(MG_BUF_LEN) /* in bytes */
+#define MG_BUF_LEN (1024 * 8)
+#endif
+
+/* Maximum queue length for pending connections. This value is passed as
+ * parameter to the "listen" socket call. */
+#if !defined(SOMAXCONN)
+#define SOMAXCONN (100) /* in pending connections (count) */
+#endif
+
+/* Size of the accepted socket queue (in case the old queue implementation
+ * is used). */
+#if !defined(MGSQLEN)
+#define MGSQLEN (20) /* count */
+#endif
+
+
+/********************************************************************/
+
+/* Helper makros */
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
+
+/* Standard defines */
 #if !defined(INT64_MAX)
 #define INT64_MAX (9223372036854775807)
-#endif
-
-
-#if !defined(MAX_WORKER_THREADS)
-#define MAX_WORKER_THREADS (1024 * 64)
-#endif
-
-#if !defined(SOCKET_TIMEOUT_QUANTUM) /* in ms */
-#define SOCKET_TIMEOUT_QUANTUM (2000)
 #endif
 
 #define SHUTDOWN_RD (0)
@@ -435,11 +489,19 @@ typedef long off_t;
 #define NO_SOCKLEN_T
 
 #if defined(_WIN64) || defined(__MINGW64__)
+#if !defined(SSL_LIB)
 #define SSL_LIB "ssleay64.dll"
+#endif
+#if !defined(CRYPTO_LIB)
 #define CRYPTO_LIB "libeay64.dll"
+#endif
 #else
+#if !defined(SSL_LIB)
 #define SSL_LIB "ssleay32.dll"
+#endif
+#if !defined(CRYPTO_LIB)
 #define CRYPTO_LIB "libeay32.dll"
+#endif
 #endif
 
 #define O_NONBLOCK (0)
@@ -806,6 +868,7 @@ timegm(struct tm *tm)
 #define va_copy(x, y) ((x) = (y))
 #endif
 
+
 #if defined(_WIN32)
 /* Create substitutes for POSIX functions in Win32. */
 
@@ -875,14 +938,6 @@ static struct pthread_mutex_undefined_struct *pthread_mutex_attr = NULL;
 #else
 static pthread_mutexattr_t pthread_mutex_attr;
 #endif /* _WIN32 */
-
-
-#define PASSWORDS_FILE_NAME ".htpasswd"
-#define CGI_ENVIRONMENT_SIZE (4096)
-#define MAX_CGI_ENVIR_VARS (256)
-#define MG_BUF_LEN (8192)
-
-#define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
 
 
 #if defined(_WIN32_WCE)
@@ -1648,15 +1703,6 @@ typedef int socklen_t;
 #define MSG_NOSIGNAL (0)
 #endif
 
-#if !defined(SOMAXCONN)
-#define SOMAXCONN (100)
-#endif
-
-/* Size of the accepted socket queue */
-#if !defined(MGSQLEN)
-#define MGSQLEN (20)
-#endif
-
 
 #if defined(NO_SSL)
 typedef struct SSL SSL; /* dummy for SSL argument to push/pull */
@@ -2281,6 +2327,9 @@ enum {
 	LUA_PRELOAD_FILE,
 	LUA_SCRIPT_EXTENSIONS,
 	LUA_SERVER_PAGE_EXTENSIONS,
+#if defined(MG_EXPERIMENTAL_INTERFACES)
+	LUA_DEBUG_PARAMS,
+#endif
 #endif
 #if defined(USE_DUKTAPE)
 	DUKTAPE_SCRIPT_EXTENSIONS,
@@ -2387,6 +2436,9 @@ static struct mg_option config_options[] = {
     {"lua_preload_file", MG_CONFIG_TYPE_FILE, NULL},
     {"lua_script_pattern", MG_CONFIG_TYPE_EXT_PATTERN, "**.lua$"},
     {"lua_server_page_pattern", MG_CONFIG_TYPE_EXT_PATTERN, "**.lp$|**.lsp$"},
+#if defined(MG_EXPERIMENTAL_INTERFACES)
+    {"lua_debug", MG_CONFIG_TYPE_STRING, NULL},
+#endif
 #endif
 #if defined(USE_DUKTAPE)
     /* The support for duktape is still in alpha version state.
@@ -2889,7 +2941,7 @@ mg_set_thread_name(const char *name)
 #elif defined(__MINGW32__)
 /* No option known to set thread name for MinGW */
 #endif
-#elif defined(__GLIBC__)                                                       \
+#elif defined(_GNU_SOURCE) && defined(__GLIBC__)                               \
     && ((__GLIBC__ > 2) || ((__GLIBC__ == 2) && (__GLIBC_MINOR__ >= 12)))
 	/* pthread_setname_np first appeared in glibc in version 2.12*/
 	(void)pthread_setname_np(pthread_self(), threadName);
@@ -3489,6 +3541,7 @@ gmt_time_string(char *buf, size_t buf_len, time_t *t)
 		buf[buf_len - 1] = '\0';
 	}
 }
+
 
 /* difftime for struct timespec. Return value is in seconds. */
 static double
@@ -4409,7 +4462,7 @@ mg_get_response_code_text(const struct mg_connection *conn, int response_code)
 }
 
 
-static void
+static int
 mg_send_http_error_impl(struct mg_connection *conn,
                         int status,
                         const char *fmt,
@@ -4429,7 +4482,7 @@ mg_send_http_error_impl(struct mg_connection *conn,
 	const char *status_text = mg_get_response_code_text(conn, status);
 
 	if ((conn == NULL) || (fmt == NULL)) {
-		return;
+		return -2;
 	}
 
 	/* Set status (for log) */
@@ -4548,7 +4601,7 @@ mg_send_http_error_impl(struct mg_connection *conn,
 				conn->in_error_handler = 1;
 				handle_file_based_request(conn, path_buf, &error_page_file);
 				conn->in_error_handler = 0;
-				return;
+				return 0;
 			}
 		}
 
@@ -4569,29 +4622,174 @@ mg_send_http_error_impl(struct mg_connection *conn,
 		          "Connection: close\r\n\r\n",
 		          date);
 
-		/* Errors 1xx, 204 and 304 MUST NOT send a body */
+		/* HTTP responses 1xx, 204 and 304 MUST NOT send a body */
 		if (has_body) {
+			/* For other errors, send a generic error message. */
 			mg_printf(conn, "Error %d: %s\n", status, status_text);
-
-			if (fmt != NULL) { /* <-- should be always true */
-				mg_write(conn, errmsg_buf, strlen(errmsg_buf));
-			}
+			mg_write(conn, errmsg_buf, strlen(errmsg_buf));
 
 		} else {
 			/* No body allowed. Close the connection. */
 			DEBUG_TRACE("Error %i", status);
 		}
 	}
+	return 0;
 }
 
 
-void
+int
 mg_send_http_error(struct mg_connection *conn, int status, const char *fmt, ...)
 {
 	va_list ap;
+	int ret;
+
 	va_start(ap, fmt);
-	mg_send_http_error_impl(conn, status, fmt, ap);
+	ret = mg_send_http_error_impl(conn, status, fmt, ap);
 	va_end(ap);
+
+	return ret;
+}
+
+
+int
+mg_send_http_ok(struct mg_connection *conn,
+                const char *mime_type,
+                long long content_length)
+{
+	char date[64];
+	time_t curtime = time(NULL);
+
+	if ((mime_type == NULL) || (*mime_type == 0)) {
+		/* Parameter error */
+		return -2;
+	}
+
+	gmt_time_string(date, sizeof(date), &curtime);
+
+	mg_printf(conn,
+	          "HTTP/1.1 200 OK\r\n"
+	          "Content-Type: %s\r\n"
+	          "Date: %s\r\n"
+	          "Connection: %s\r\n",
+	          mime_type,
+	          date,
+	          suggest_connection_header(conn));
+
+	send_no_cache_header(conn);
+	send_additional_header(conn);
+	if (content_length < 0) {
+		mg_printf(conn, "Transfer-Encoding: chunked\r\n\r\n");
+	} else {
+		mg_printf(conn,
+		          "Content-Length: %" UINT64_FMT "\r\n\r\n",
+		          (uint64_t)content_length);
+	}
+
+	return 0;
+}
+
+
+int
+mg_send_http_redirect(struct mg_connection *conn,
+                      const char *target_url,
+                      int redirect_code)
+{
+	/* Send a 30x redirect response.
+	 *
+	 * Redirect types (status codes):
+	 *
+	 * Status | Perm/Temp | Method              | Version
+	 *   301  | permanent | POST->GET undefined | HTTP/1.0
+	 *   302  | temporary | POST->GET undefined | HTTP/1.0
+	 *   303  | temporary | always use GET      | HTTP/1.1
+	 *   307  | temporary | always keep method  | HTTP/1.1
+	 *   308  | permanent | always keep method  | HTTP/1.1
+	 */
+	const char *redirect_text;
+	int ret;
+	size_t content_len = 0;
+	char reply[MG_BUF_LEN];
+
+	/* In case redirect_code=0, use 307. */
+	if (redirect_code == 0) {
+		redirect_code = 307;
+	}
+
+	/* In case redirect_code is none of the above, return error. */
+	if ((redirect_code != 301) && (redirect_code != 302)
+	    && (redirect_code != 303) && (redirect_code != 307)
+	    && (redirect_code != 308)) {
+		/* Parameter error */
+		return -2;
+	}
+
+	/* Get proper text for response code */
+	redirect_text = mg_get_response_code_text(conn, redirect_code);
+
+	/* If target_url is not defined, redirect to "/". */
+	if ((target_url == NULL) || (*target_url == 0)) {
+		target_url = "/";
+	}
+
+#if defined(MG_SEND_REDIRECT_BODY)
+	/* TODO: condition name? */
+
+	/* Prepare a response body with a hyperlink.
+	 *
+	 * According to RFC2616 (and RFC1945 before):
+	 * Unless the request method was HEAD, the entity of the
+	 * response SHOULD contain a short hypertext note with a hyperlink to
+	 * the new URI(s).
+	 *
+	 * However, this response body is not useful in M2M communication.
+	 * Probably the original reason in the RFC was, clients not supporting
+	 * a 30x HTTP redirect could still show the HTML page and let the user
+	 * press the link. Since current browsers support 30x HTTP, the additional
+	 * HTML body does not seem to make sense anymore.
+	 *
+	 * The new RFC7231 (Section 6.4) does no longer recommend it ("SHOULD"),
+	 * but it only notes:
+	 * The server's response payload usually contains a short
+	 * hypertext note with a hyperlink to the new URI(s).
+	 *
+	 * Deactivated by default. If you need the 30x body, set the define.
+	 */
+	mg_snprintf(
+	    conn,
+	    NULL /* ignore truncation */,
+	    reply,
+	    sizeof(reply),
+	    "<html><head>%s</head><body><a href=\"%s\">%s</a></body></html>",
+	    redirect_text,
+	    target_url,
+	    target_url);
+	content_len = strlen(reply);
+#else
+	reply[0] = 0;
+#endif
+
+	/* Do not send any additional header. For all other options,
+	 * including caching, there are suitable defaults. */
+	ret = mg_printf(conn,
+	                "HTTP/1.1 %i %s\r\n"
+	                "Location: %s\r\n"
+	                "Content-Length: %u\r\n"
+	                "Connection: %s\r\n\r\n",
+	                redirect_code,
+	                redirect_text,
+	                target_url,
+	                (unsigned int)content_len,
+	                suggest_connection_header(conn));
+
+	/* Send response body */
+	if (ret > 0) {
+		/* ... unless it is a HEAD request */
+		if (0 != strcmp(conn->request_info.request_method, "HEAD")) {
+			ret = mg_write(conn, reply, content_len);
+		}
+	}
+
+	return (ret > 0) ? ret : -1;
 }
 
 
@@ -9256,8 +9454,12 @@ handle_static_file_request(struct mg_connection *conn,
 	const char *encoding = "";
 	const char *cors1, *cors2, *cors3;
 	int is_head_request;
+
 #if defined(USE_ZLIB)
-	int allow_on_the_fly_compression = 1; /* TODO: get from config */
+	/* Compression is allowed, unless there is a reason not to use compression.
+	 * If the file is already compressed, too small or a "range" request was
+	 * made, on the fly compression is not possible. */
+	int allow_on_the_fly_compression = 1;
 #endif
 
 	if ((conn == NULL) || (conn->dom_ctx == NULL) || (filep == NULL)) {
@@ -9323,7 +9525,8 @@ handle_static_file_request(struct mg_connection *conn,
 
 	fclose_on_exec(&filep->access, conn);
 
-	/* If Range: header specified, act accordingly */
+	/* If "Range" request was made: parse header, send only selected part
+	 * of the file. */
 	r1 = r2 = 0;
 	hdr = mg_get_header(conn, "Range");
 	if ((hdr != NULL) && ((n = parse_range_header(hdr, &r1, &r2)) > 0)
@@ -9359,6 +9562,16 @@ handle_static_file_request(struct mg_connection *conn,
 #endif
 	}
 
+/* Do not compress small files. Small files do not benefit from file
+ * compression, but there is still some overhead. */
+#if defined(USE_ZLIB)
+	if (filep->stat.size < MG_FILE_COMPRESSION_SIZE_LIMIT) {
+		/* File is below the size limit. */
+		allow_on_the_fly_compression = 0;
+	}
+#endif
+
+	/* Standard CORS header */
 	hdr = mg_get_header(conn, "Origin");
 	if (hdr) {
 		/* Cross-origin resource sharing (CORS), see
@@ -10386,7 +10599,7 @@ prepare_cgi_environment(struct mg_connection *conn,
 	addenv(env, "SERVER_NAME=%s", conn->dom_ctx->config[AUTHENTICATION_DOMAIN]);
 	addenv(env, "SERVER_ROOT=%s", conn->dom_ctx->config[DOCUMENT_ROOT]);
 	addenv(env, "DOCUMENT_ROOT=%s", conn->dom_ctx->config[DOCUMENT_ROOT]);
-	addenv(env, "SERVER_SOFTWARE=%s/%s", "Civetweb", mg_version());
+	addenv(env, "SERVER_SOFTWARE=CivetWeb/%s", mg_version());
 
 	/* Prepare the environment block */
 	addenv(env, "%s", "GATEWAY_INTERFACE=CGI/1.1");
@@ -10787,7 +11000,7 @@ handle_cgi_request(struct mg_connection *conn, const char *prog)
 		}
 	} else if (get_header(ri.http_headers, ri.num_headers, "Location")
 	           != NULL) {
-		conn->status_code = 302;
+		conn->status_code = 307;
 	} else {
 		conn->status_code = 200;
 	}
@@ -12666,29 +12879,53 @@ alloc_get_host(struct mg_connection *conn)
 static void
 redirect_to_https_port(struct mg_connection *conn, int ssl_index)
 {
+	char target_url[MG_BUF_LEN];
+	int truncated = 0;
+
 	conn->must_close = 1;
 
 	/* Send host, port, uri and (if it exists) ?query_string */
 	if (conn->host) {
-		mg_printf(conn,
-		          "HTTP/1.1 302 Found\r\nLocation: https://%s:%d%s%s%s\r\n\r\n",
-		          conn->host,
+
+		/* Use "308 Permanent Redirect" */
+		int redirect_code = 308;
+
+		/* Create target URL */
+		mg_snprintf(
+		    conn,
+		    &truncated,
+		    target_url,
+		    sizeof(target_url),
+		    "Location: https://%s:%d%s%s%s",
+
+		    conn->host,
 #if defined(USE_IPV6)
-		          (conn->phys_ctx->listening_sockets[ssl_index].lsa.sa.sa_family
-		           == AF_INET6)
-		              ? (int)ntohs(conn->phys_ctx->listening_sockets[ssl_index]
-		                               .lsa.sin6.sin6_port)
-		              :
+		    (conn->phys_ctx->listening_sockets[ssl_index].lsa.sa.sa_family
+		     == AF_INET6)
+		        ? (int)ntohs(conn->phys_ctx->listening_sockets[ssl_index]
+		                         .lsa.sin6.sin6_port)
+		        :
 #endif
-		              (int)ntohs(conn->phys_ctx->listening_sockets[ssl_index]
-		                             .lsa.sin.sin_port),
-		          conn->request_info.local_uri,
-		          (conn->request_info.query_string == NULL) ? "" : "?",
-		          (conn->request_info.query_string == NULL)
-		              ? ""
-		              : conn->request_info.query_string);
+		        (int)ntohs(conn->phys_ctx->listening_sockets[ssl_index]
+		                       .lsa.sin.sin_port),
+		    conn->request_info.local_uri,
+		    (conn->request_info.query_string == NULL) ? "" : "?",
+		    (conn->request_info.query_string == NULL)
+		        ? ""
+		        : conn->request_info.query_string);
+
+		/* Check overflow in location buffer (will not occur if MG_BUF_LEN
+		 * is used as buffer size) */
+		if (truncated) {
+			mg_send_http_error(conn, 500, "%s", "Redirect URL too long");
+			return;
+		}
+
+		/* Use redirect helper function */
+		mg_send_http_redirect(conn, target_url, redirect_code);
 	}
 }
+
 
 static void
 handler_info_acquire(struct mg_handler_info *handler_info)
@@ -12698,6 +12935,7 @@ handler_info_acquire(struct mg_handler_info *handler_info)
 	pthread_mutex_unlock(&handler_info->refcount_mutex);
 }
 
+
 static void
 handler_info_release(struct mg_handler_info *handler_info)
 {
@@ -12706,6 +12944,7 @@ handler_info_release(struct mg_handler_info *handler_info)
 	pthread_cond_signal(&handler_info->refcount_cond);
 	pthread_mutex_unlock(&handler_info->refcount_mutex);
 }
+
 
 static void
 handler_info_wait_unused(struct mg_handler_info *handler_info)
@@ -13660,15 +13899,9 @@ handle_request(struct mg_connection *conn)
 		return;
 	}
 
+	/* 15. read a normal file with GET or HEAD */
 	handle_file_based_request(conn, path, &file);
 #endif /* !defined(NO_FILES) */
-
-#if 0
-            /* Perform redirect and auth checks before calling begin_request()
-             * handler.
-             * Otherwise, begin_request() would need to perform auth checks and
-             * redirects. */
-#endif
 }
 
 
@@ -13857,15 +14090,26 @@ parse_port_string(const struct vec *vec, struct socket *so, int *ip_version)
 		*ip_version = 4;
 
 	} else if ((cb = strchr(vec->ptr, ':')) != NULL) {
-		/* Could be a hostname */
-		/* Will only work for RFC 952 compliant hostnames,
+		/* String could be a hostname. This check algotithm
+		 * will only work for RFC 952 compliant hostnames,
 		 * starting with a letter, containing only letters,
 		 * digits and hyphen ('-'). Newer specs may allow
 		 * more, but this is not guaranteed here, since it
 		 * may interfere with rules for port option lists. */
 
-		*(char *)cb = 0; /* Use a const cast here and modify the string.
-		                  * We are going to restore the string later. */
+		/* According to RFC 1035, hostnames are restricted to 255 characters
+		 * in total (63 between two dots). */
+		char hostname[256];
+		size_t hostnlen = (size_t)(cb - vec->ptr);
+
+		if (hostnlen >= sizeof(hostname)) {
+			/* This would be invalid in any case */
+			*ip_version = 0;
+			return 0;
+		}
+
+		memcpy(hostname, vec->ptr, hostnlen);
+		hostname[hostnlen] = 0;
 
 		if (mg_inet_pton(
 		        AF_INET, vec->ptr, &so->lsa.sin, sizeof(so->lsa.sin))) {
@@ -13873,7 +14117,7 @@ parse_port_string(const struct vec *vec, struct socket *so, int *ip_version)
 				*ip_version = 4;
 				so->lsa.sin.sin_family = AF_INET;
 				so->lsa.sin.sin_port = htons((uint16_t)port);
-				len += (int)(cb - vec->ptr) + 1;
+				len += (int)(hostnlen + 1);
 			} else {
 				port = 0;
 				len = 0;
@@ -13887,7 +14131,7 @@ parse_port_string(const struct vec *vec, struct socket *so, int *ip_version)
 				*ip_version = 6;
 				so->lsa.sin6.sin6_family = AF_INET6;
 				so->lsa.sin.sin_port = htons((uint16_t)port);
-				len += (int)(cb - vec->ptr) + 1;
+				len += (int)(hostnlen + 1);
 			} else {
 				port = 0;
 				len = 0;
@@ -13895,7 +14139,6 @@ parse_port_string(const struct vec *vec, struct socket *so, int *ip_version)
 #endif
 		}
 
-		*(char *)cb = ':'; /* restore the string */
 
 	} else {
 		/* Parsing failure. */
@@ -13917,7 +14160,7 @@ parse_port_string(const struct vec *vec, struct socket *so, int *ip_version)
 		return 1;
 	}
 
-	/* Reset ip_version to 0 of there is an error */
+	/* Reset ip_version to 0 if there is an error */
 	*ip_version = 0;
 	return 0;
 }
@@ -13928,11 +14171,53 @@ static int
 is_ssl_port_used(const char *ports)
 {
 	if (ports) {
-		if (strchr(ports, 's')) {
-			return 1;
-		}
-		if (strchr(ports, 'r')) {
-			return 1;
+		/* There are several different allowed syntax variants:
+		 * - "80" for a single port using every network interface
+		 * - "localhost:80" for a single port using only localhost
+		 * - "80,localhost:8080" for two ports, one bound to localhost
+		 * - "80,127.0.0.1:8084,[::1]:8086" for three ports, one bound
+		 *   to IPv4 localhost, one to IPv6 localhost
+		 * - "+80" use port 80 for IPv4 and IPv6
+		 * - "+80r,+443s" port 80 (HTTP) is a redirect to port 443 (HTTPS),
+		 *   for both: IPv4 and IPv4
+		 * - "+443s,localhost:8080" port 443 (HTTPS) for every interface,
+		 *   additionally port 8080 bound to localhost connections
+		 *
+		 * If we just look for 's' anywhere in the string, "localhost:80"
+		 * will be detected as SSL (false positive).
+		 * Looking for 's' after a digit may cause false positives in
+		 * "my24service:8080".
+		 * Looking from 's' backward if there are only ':' and numbers
+		 * before will not work for "24service:8080" (non SSL, port 8080)
+		 * or "24s" (SSL, port 24).
+		 *
+		 * Remark: Initially hostnames were not allowed to start with a
+		 * digit (according to RFC 952), this was allowed later (RFC 1123,
+		 * Section 2.1).
+		 *
+		 * To get this correct, the entire string must be parsed as a whole,
+		 * reading it as a list element for element and parsing with an
+		 * algorithm equivalent to parse_port_string.
+		 *
+		 * In fact, we use local interface names here, not arbitrary hostnames,
+		 * so in most cases the only name will be "localhost".
+		 *
+		 * So, for now, we use this simple algorithm, that may still return
+		 * a false positive in bizarre cases.
+		 */
+		int i;
+		int portslen = (int)strlen(ports);
+		char prevIsNumber = 0;
+
+		for (i = 0; i < portslen; i++) {
+			if (prevIsNumber && (ports[i] == 's' || ports[i] == 'r')) {
+				return 1;
+			}
+			if (ports[i] >= '0' && ports[i] <= '9') {
+				prevIsNumber = 1;
+			} else {
+				prevIsNumber = 0;
+			}
 		}
 	}
 	return 0;
@@ -14871,7 +15156,7 @@ initialize_ssl(char *ebuf, size_t ebuf_len)
 	}
 
 #else /* not OPENSSL_API_1_1 */
-	int i;
+	int i, num_locks;
 	size_t size;
 
 	if (ebuf_len > 0) {
@@ -14902,28 +15187,49 @@ initialize_ssl(char *ebuf, size_t ebuf_len)
 	/* Initialize locking callbacks, needed for thread safety.
 	 * http://www.openssl.org/support/faq.html#PROG1
 	 */
-	i = CRYPTO_num_locks();
-	if (i < 0) {
-		i = 0;
+	num_locks = CRYPTO_num_locks();
+	if (num_locks < 0) {
+		num_locks = 0;
 	}
-	size = sizeof(pthread_mutex_t) * ((size_t)(i));
+	size = sizeof(pthread_mutex_t) * ((size_t)(num_locks));
 
-	if (size == 0) {
+	/* allocate mutex array, if required */
+	if (num_locks == 0) {
+		/* No mutex array required */
 		ssl_mutexes = NULL;
-	} else if ((ssl_mutexes = (pthread_mutex_t *)mg_malloc(size)) == NULL) {
-		mg_snprintf(NULL,
-		            NULL, /* No truncation check for ebuf */
-		            ebuf,
-		            ebuf_len,
-		            "%s: cannot allocate mutexes: %s",
-		            __func__,
-		            ssl_error());
-		DEBUG_TRACE("%s", ebuf);
-		return 0;
-	}
+	} else {
+		/* Mutex array required - allocate it */
+		ssl_mutexes = (pthread_mutex_t *)mg_malloc(size);
 
-	for (i = 0; i < CRYPTO_num_locks(); i++) {
-		pthread_mutex_init(&ssl_mutexes[i], &pthread_mutex_attr);
+		/* Check OOM */
+		if (ssl_mutexes == NULL) {
+			mg_snprintf(NULL,
+			            NULL, /* No truncation check for ebuf */
+			            ebuf,
+			            ebuf_len,
+			            "%s: cannot allocate mutexes: %s",
+			            __func__,
+			            ssl_error());
+			DEBUG_TRACE("%s", ebuf);
+			return 0;
+		}
+
+		/* initialize mutex array */
+		for (i = 0; i < num_locks; i++) {
+			if (0 != pthread_mutex_init(&ssl_mutexes[i], &pthread_mutex_attr)) {
+				mg_snprintf(NULL,
+				            NULL, /* No truncation check for ebuf */
+				            ebuf,
+				            ebuf_len,
+				            "%s: error initializing mutex %i of %i",
+				            __func__,
+				            i,
+				            num_locks);
+				DEBUG_TRACE("%s", ebuf);
+				mg_free(ssl_mutexes);
+				return 0;
+			}
+		}
 	}
 
 	CRYPTO_set_locking_callback(&ssl_locking_callback);
@@ -14934,6 +15240,7 @@ initialize_ssl(char *ebuf, size_t ebuf_len)
 	if (!ssllib_dll_handle) {
 		ssllib_dll_handle = load_dll(ebuf, ebuf_len, SSL_LIB, ssl_sw);
 		if (!ssllib_dll_handle) {
+			mg_free(ssl_mutexes);
 			DEBUG_TRACE("%s", ebuf);
 			return 0;
 		}
@@ -15188,6 +15495,10 @@ init_ssl_ctx_impl(struct mg_context *phys_ctx,
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wincompatible-pointer-types"
 #endif
+#if defined(__GNUC__) || defined(__MINGW32__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#endif
 	/* Depending on the OpenSSL version, the callback may be
 	 * 'void (*)(SSL *, int, int)' or 'void (*)(const SSL *, int, int)'
 	 * yielding in an "incompatible-pointer-type" warning for the other
@@ -15207,6 +15518,9 @@ init_ssl_ctx_impl(struct mg_context *phys_ctx,
 	                                       ssl_servername_callback);
 	SSL_CTX_set_tlsext_servername_arg(dom_ctx->ssl_ctx, phys_ctx);
 
+#if defined(__GNUC__) || defined(__MINGW32__)
+#pragma GCC diagnostic pop
+#endif
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
@@ -15960,7 +16274,20 @@ mg_connect_client_impl(const struct mg_client_options *client_options,
 	}
 
 	conn->client.is_ssl = use_ssl ? 1 : 0;
-	(void)pthread_mutex_init(&conn->mutex, &pthread_mutex_attr);
+	if (0 != pthread_mutex_init(&conn->mutex, &pthread_mutex_attr)) {
+		mg_snprintf(NULL,
+		            NULL, /* No truncation check for ebuf */
+		            ebuf,
+		            ebuf_len,
+		            "Can not create mutex");
+#if !defined(NO_SSL)
+		SSL_CTX_free(conn->client_ssl_ctx);
+#endif
+		closesocket(sock);
+		mg_free(conn);
+		return NULL;
+	}
+
 
 #if !defined(NO_SSL)
 	if (use_ssl) {
@@ -17230,7 +17557,11 @@ worker_thread_run(struct worker_thread_args *thread_args)
 	/* Allocate a mutex for this connection to allow communication both
 	 * within the request handler and from elsewhere in the application
 	 */
-	(void)pthread_mutex_init(&conn->mutex, &pthread_mutex_attr);
+	if (0 != pthread_mutex_init(&conn->mutex, &pthread_mutex_attr)) {
+		mg_free(conn->buf);
+		mg_cry_internal(fc(ctx), "%s", "Cannot create mutex");
+		return NULL;
+	}
 
 #if defined(USE_SERVER_STATS)
 	conn->conn_state = 1; /* not consumed */
@@ -17841,12 +18172,12 @@ mg_start(const struct mg_callbacks *callbacks,
 #endif
 	pthread_setspecific(sTlsKey, &tls);
 
-	ok = 0 == pthread_mutex_init(&ctx->thread_mutex, &pthread_mutex_attr);
+	ok = (0 == pthread_mutex_init(&ctx->thread_mutex, &pthread_mutex_attr));
 #if !defined(ALTERNATIVE_QUEUE)
-	ok &= 0 == pthread_cond_init(&ctx->sq_empty, NULL);
-	ok &= 0 == pthread_cond_init(&ctx->sq_full, NULL);
+	ok &= (0 == pthread_cond_init(&ctx->sq_empty, NULL));
+	ok &= (0 == pthread_cond_init(&ctx->sq_full, NULL));
 #endif
-	ok &= 0 == pthread_mutex_init(&ctx->nonce_mutex, &pthread_mutex_attr);
+	ok &= (0 == pthread_mutex_init(&ctx->nonce_mutex, &pthread_mutex_attr));
 	if (!ok) {
 		/* Fatal error - abort start. However, this situation should never
 		 * occur in practice. */
@@ -18036,11 +18367,11 @@ mg_start(const struct mg_callbacks *callbacks,
 	    (struct socket *)mg_calloc_ctx(sizeof(ctx->client_socks[0]),
 	                                   ctx->cfg_worker_threads,
 	                                   ctx);
-	if (ctx->client_wait_events == NULL) {
+	if (ctx->client_socks == NULL) {
 		mg_cry_internal(fc(ctx),
 		                "%s",
 		                "Not enough memory for worker socket array");
-		mg_free(ctx->client_socks);
+		mg_free(ctx->client_wait_events);
 		mg_free(ctx->worker_threadids);
 		free_context(ctx);
 		pthread_setspecific(sTlsKey, NULL);
@@ -18056,6 +18387,7 @@ mg_start(const struct mg_callbacks *callbacks,
 				event_destroy(ctx->client_wait_events[i]);
 			}
 			mg_free(ctx->client_socks);
+			mg_free(ctx->client_wait_events);
 			mg_free(ctx->worker_threadids);
 			free_context(ctx);
 			pthread_setspecific(sTlsKey, NULL);
@@ -18171,6 +18503,8 @@ mg_start_domain(struct mg_context *ctx, const char **options)
 	/* Authentication domain is mandatory */
 	/* TODO: Maybe use a new option hostname? */
 	if (!new_dom->config[AUTHENTICATION_DOMAIN]) {
+		mg_cry_internal(fc(ctx), "%s", "authentication domain required");
+		mg_free(new_dom);
 		return -4;
 	}
 
@@ -18749,6 +19083,13 @@ mg_get_context_info_impl(const struct mg_context *ctx, char *buffer, int buflen)
 	}
 
 	if (ctx) {
+		/* Declare all variables at begin of the block, to comply
+		 * with old C standards. */
+		char start_time_str[64] = {0};
+		char now_str[64] = {0};
+		time_t start_time = ctx->start_time;
+		time_t now = time(NULL);
+
 		/* Connections information */
 		mg_snprintf(NULL,
 		            NULL,
@@ -18813,11 +19154,6 @@ mg_get_context_info_impl(const struct mg_context *ctx, char *buffer, int buflen)
 		}
 
 		/* Execution time information */
-		char start_time_str[64] = {0};
-		char now_str[64] = {0};
-		time_t start_time = ctx->start_time;
-		time_t now = time(NULL);
-
 		gmt_time_string(start_time_str,
 		                sizeof(start_time_str) - 1,
 		                &start_time);

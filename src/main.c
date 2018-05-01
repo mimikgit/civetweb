@@ -279,7 +279,7 @@ show_usage_and_exit(const char *exeName)
 	fprintf(stderr, "    %s [config_file]\n", exeName);
 	fprintf(stderr, "    %s [-option value ...]\n", exeName);
 	fprintf(stderr, "  Run as client:\n");
-	fprintf(stderr, "    %s -C\n", exeName);
+	fprintf(stderr, "    %s -C url\n", exeName);
 	fprintf(stderr, "  Show system information:\n");
 	fprintf(stderr, "    %s -I\n", exeName);
 	fprintf(stderr, "  Add user/change password:\n");
@@ -1046,7 +1046,7 @@ static int
 run_client(const char *url_arg)
 {
 	/* connection data */
-	char *url = sdup(url_arg);
+	char *url = sdup(url_arg); /* OOM will cause program to exit */
 	char *host;
 	char *resource;
 	int is_ssl = 0;
@@ -1059,11 +1059,13 @@ run_client(const char *url_arg)
 	struct mg_connection *conn;
 	char ebuf[1024] = {0};
 
-	/* Check out of memory */
-	if (!url) {
-		fprintf(stderr, "Out of memory\n");
-		return 0;
-	}
+#if 0 /* Unreachable code, since sdup will never return NULL */
+    /* Check out of memory */
+    if (!url) {
+        fprintf(stderr, "Out of memory\n");
+        return 0;
+    }
+#endif
 
 	/* Check parameter */
 	if (!strncmp(url, "http://", 7)) {
@@ -1525,6 +1527,33 @@ struct dlg_proc_param {
 	BOOL (*fRetry)(struct dlg_proc_param *data);
 };
 
+struct dlg_header_param {
+	DLGTEMPLATE dlg_template; /* 18 bytes */
+	WORD menu, dlg_class;
+	wchar_t caption[1];
+	WORD fontsiz;
+	wchar_t fontface[7];
+};
+
+static struct dlg_header_param
+GetDlgHeader(unsigned pWidth)
+{
+	struct dlg_header_param dialog_header = {{WS_CAPTION | WS_POPUP | WS_SYSMENU
+	                                              | WS_VISIBLE | DS_SETFONT
+	                                              | WS_DLGFRAME,
+	                                          WS_EX_TOOLWINDOW,
+	                                          0,
+	                                          200,
+	                                          200,
+	                                          pWidth,
+	                                          0},
+	                                         0,
+	                                         0,
+	                                         L"",
+	                                         8,
+	                                         L"Tahoma"};
+	return dialog_header;
+}
 
 /* Dialog proc for settings dialog */
 static INT_PTR CALLBACK
@@ -1827,25 +1856,7 @@ get_password(const char *user,
 	short y;
 	static struct dlg_proc_param s_dlg_proc_param;
 
-	static struct {
-		DLGTEMPLATE dlg_template; /* 18 bytes */
-		WORD menu, dlg_class;
-		wchar_t caption[1];
-		WORD fontsiz;
-		wchar_t fontface[7];
-	} dialog_header = {{WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_VISIBLE
-	                        | DS_SETFONT | WS_DLGFRAME,
-	                    WS_EX_TOOLWINDOW,
-	                    0,
-	                    200,
-	                    200,
-	                    WIDTH,
-	                    0},
-	                   0,
-	                   0,
-	                   L"",
-	                   8,
-	                   L"Tahoma"};
+	const struct dlg_header_param dialog_header = GetDlgHeader(WIDTH);
 
 	DEBUG_ASSERT((user != NULL) && (realm != NULL) && (passwd != NULL));
 
@@ -1874,7 +1885,8 @@ get_password(const char *user,
 
 	/* Create the dialog */
 	(void)memset(mem, 0, sizeof(mem));
-	(void)memcpy(mem, &dialog_header, sizeof(dialog_header));
+	p = mem;
+	(void)memcpy(p, &dialog_header, sizeof(dialog_header));
 	p = mem + sizeof(dialog_header);
 
 	y = HEIGHT;
@@ -2121,25 +2133,7 @@ show_settings_dialog()
 	short width, x, y;
 	static struct dlg_proc_param s_dlg_proc_param;
 
-	static struct {
-		DLGTEMPLATE dlg_template; /* 18 bytes */
-		WORD menu, dlg_class;
-		wchar_t caption[1];
-		WORD fontsiz;
-		wchar_t fontface[7];
-	} dialog_header = {{WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_VISIBLE
-	                        | DS_SETFONT | WS_DLGFRAME,
-	                    WS_EX_TOOLWINDOW,
-	                    0,
-	                    200,
-	                    200,
-	                    WIDTH,
-	                    0},
-	                   0,
-	                   0,
-	                   L"",
-	                   8,
-	                   L"Tahoma"};
+	const struct dlg_header_param dialog_header = GetDlgHeader(WIDTH);
 
 	if (s_dlg_proc_param.guard == 0) {
 		memset(&s_dlg_proc_param, 0, sizeof(s_dlg_proc_param));
@@ -2150,7 +2144,8 @@ show_settings_dialog()
 	}
 
 	(void)memset(mem, 0, sizeof(mem));
-	(void)memcpy(mem, &dialog_header, sizeof(dialog_header));
+	p = mem;
+	(void)memcpy(p, &dialog_header, sizeof(dialog_header));
 	p = mem + sizeof(dialog_header);
 
 	options = mg_get_valid_options();
@@ -2314,25 +2309,7 @@ change_password_file()
 	const char *domain = mg_get_option(g_ctx, "authentication_domain");
 	static struct dlg_proc_param s_dlg_proc_param;
 
-	static struct {
-		DLGTEMPLATE dlg_template; /* 18 bytes */
-		WORD menu, dlg_class;
-		wchar_t caption[1];
-		WORD fontsiz;
-		wchar_t fontface[7];
-	} dialog_header = {{WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_VISIBLE
-	                        | DS_SETFONT | WS_DLGFRAME,
-	                    WS_EX_TOOLWINDOW,
-	                    0,
-	                    200,
-	                    200,
-	                    WIDTH,
-	                    0},
-	                   0,
-	                   0,
-	                   L"",
-	                   8,
-	                   L"Tahoma"};
+	const struct dlg_header_param dialog_header = GetDlgHeader(WIDTH);
 
 	if (s_dlg_proc_param.guard == 0) {
 		memset(&s_dlg_proc_param, 0, sizeof(s_dlg_proc_param));
@@ -2368,7 +2345,8 @@ change_password_file()
 	do {
 		s_dlg_proc_param.hWnd = NULL;
 		(void)memset(mem, 0, sizeof(mem));
-		(void)memcpy(mem, &dialog_header, sizeof(dialog_header));
+		p = mem;
+		(void)memcpy(p, &dialog_header, sizeof(dialog_header));
 		p = mem + sizeof(dialog_header);
 
 		f = fopen(path, "r+");
@@ -2555,25 +2533,7 @@ show_system_info()
 	short y;
 	static struct dlg_proc_param s_dlg_proc_param;
 
-	static struct {
-		DLGTEMPLATE dlg_template; /* 18 bytes */
-		WORD menu, dlg_class;
-		wchar_t caption[1];
-		WORD fontsiz;
-		wchar_t fontface[7];
-	} dialog_header = {{WS_CAPTION | WS_POPUP | WS_SYSMENU | WS_VISIBLE
-	                        | DS_SETFONT | WS_DLGFRAME,
-	                    WS_EX_TOOLWINDOW,
-	                    0,
-	                    200,
-	                    200,
-	                    WIDTH,
-	                    0},
-	                   0,
-	                   0,
-	                   L"",
-	                   8,
-	                   L"Tahoma"};
+	const struct dlg_header_param dialog_header = GetDlgHeader(WIDTH);
 
 	/* Only allow one instance of this dialog to be open. */
 	if (s_dlg_proc_param.guard == 0) {
@@ -2586,7 +2546,8 @@ show_system_info()
 
 	/* Create the dialog */
 	(void)memset(mem, 0, sizeof(mem));
-	(void)memcpy(mem, &dialog_header, sizeof(dialog_header));
+	p = mem;
+	(void)memcpy(p, &dialog_header, sizeof(dialog_header));
 	p = mem + sizeof(dialog_header);
 
 	y = HEIGHT;
