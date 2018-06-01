@@ -15120,7 +15120,7 @@ mg_connect_websocket_client(const char *host,
 
 		DEBUG_TRACE("Websocket client connect error: %s\r\n", error_buffer);
 		mg_free(conn);
-		return conn;
+		return NULL;
 	}
 
 	/* For client connections, mg_context is fake. Since we need to set a
