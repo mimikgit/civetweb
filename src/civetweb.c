@@ -2067,6 +2067,8 @@ struct mg_context {
 	                                */
 
 	struct socket *listening_sockets;
+	#define MAIN_THREAD_STOP_MSG 1024
+	int listen_ctrl_sd ;
 	struct pollfd *listening_socket_fds;
 	unsigned int num_listening_sockets;
 
@@ -8344,39 +8346,71 @@ send_file_data(struct mg_connection *conn,
 		    && (!mg_strcasecmp(conn->ctx->config[ALLOW_SENDFILE_CALL],
 		                       "yes"))) {
 			off_t sf_offs = (off_t)offset;
-			ssize_t sf_sent;
+			ssize_t sf_sent = 0 ;
 			int sf_file = fileno(filep->access.fp);
-			int loop_cnt = 0;
+			int unavailablecnt = 0;
+
+			printf("%s() sendfile start: sock=%d len=%ld offset=%ld time=%ld sec\n",
+				__func__,conn->client.sock,len,offset,time(NULL));
 
 			do {
 				/* 2147479552 (0x7FFFF000) is a limit found by experiment on
 				 * 64 bit Linux (2^31 minus one memory page of 4k?). */
 				size_t sf_tosend =
 				    (size_t)((len < 0x7FFFF000) ? len : 0x7FFFF000);
+				errno = 0 ; /* errno reset not necessary, but safer as it is checked */
 				sf_sent =
 				    sendfile(conn->client.sock, sf_file, &sf_offs, sf_tosend);
 				if (sf_sent > 0) {
 					len -= sf_sent;
 					offset += sf_sent;
-				} else if (loop_cnt == 0) {
-					/* This file can not be sent using sendfile.
-					 * This might be the case for pseudo-files in the
-					 * /sys/ and /proc/ file system.
-					 * Use the regular user mode copy code instead. */
-					break;
-				} else if (sf_sent == 0) {
-					/* No error, but 0 bytes sent. May be EOF? */
-					return;
 				}
-				loop_cnt++;
+				else if (sf_sent < 0) {
+					/* sendfile returns < 0 */
+					if((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+					/* Most Likely: sendfile() EAGAIN or EWOULDBLOCK, wait on poll and try again.
+					  The intent is to maximize the usage of sendfile */
+						struct pollfd p_fd;
+						int prc = 0 ;
+						unavailablecnt++;
+						#define RETRY_POLLWAIT_MS 250
+						p_fd.fd = conn->client.sock ;
+						p_fd.revents = 0 ;
+						p_fd.events = POLLOUT | POLLERR | POLLHUP | POLLNVAL;
+						/* Using poll here to wait for event on sendfile socket */
+						prc = poll(&p_fd, 1, RETRY_POLLWAIT_MS) ;
+						if(prc < 0) {
+							/* poll error, break to try classic way of sending */
+							break;
+						}
+						/* continue loop to try sendfile now */
+						continue;
+					}
+					else {
+						/* printf("%s() sock=%d sf_sent=%ld len=%ld offset=%ld sendfile error=%d , %s\n",
+						__func__,conn->client.sock,sf_sent,len,offset, errno, strerror(errno)); */
 
-			} while ((len > 0) && (sf_sent >= 0));
+						/* sendfile other errors, break and try classic way of sending */
+						break;
+					}
+				}
+				else {
+					/* unlikely: sendfile returns 0, break and try classic way of sending */
+					break;
+				}
 
-			if (sf_sent > 0) {
+			} while (len > 0);
+
+			printf("%s() sendfile summary: sf_sent(rc)=%ld sock=%d time=%ld sec "
+				" pending_len=%ld sf_offs=%ld offset=%ld EAGAIN-unavailable count=%d \n",
+				__func__,sf_sent,conn->client.sock,time(NULL),
+				len,sf_offs,offset,unavailablecnt);
+
+			if (len <= 0) {
 				return; /* OK */
 			}
 
-			/* sf_sent<0 means error, thus fall back to the classic way */
+			/* if len > 0 still , fall back to the classic way */
 			/* This is always the case, if sf_file is not a "normal" file,
 			 * e.g., for sending data from the output of a CGI process. */
 			offset = (int64_t)sf_offs;
@@ -12929,9 +12963,10 @@ set_ports_option(struct mg_context *ctx)
 			continue;
 		}
 
+		/* add 1 more pollfd slot for listen_ctrl_sd socket */
 		if ((pfd = (struct pollfd *)
 		         mg_realloc_ctx(ctx->listening_socket_fds,
-		                        (ctx->num_listening_sockets + 1)
+		                        (ctx->num_listening_sockets + 2)
 		                            * sizeof(ctx->listening_socket_fds[0]),
 		                        ctx)) == NULL) {
 
@@ -15905,6 +15940,7 @@ master_thread_run(void *thread_func_param)
 	struct mg_workerTLS tls;
 	struct pollfd *pfd;
 	unsigned int i;
+	unsigned int ctrlidx = 0 ;
 	unsigned int workerthreadcount;
 
 	if (!ctx) {
@@ -15951,7 +15987,17 @@ master_thread_run(void *thread_func_param)
 			pfd[i].events = POLLIN;
 		}
 
-		if (poll(pfd, ctx->num_listening_sockets, 200) > 0) {
+		ctrlidx = 0 ; //reset
+		if (ctx->listen_ctrl_sd > 0) {
+			pfd[i].fd = ctx->listen_ctrl_sd ;
+			pfd[i].events = POLLIN;
+			ctrlidx = 1 ;
+		}
+
+                /* change to 5000 ms poll timeout for civetweb-master, than earlier frequent 200ms */
+                #define MASTER_POLL_TIMEOUT_MS 5000
+
+		if (poll(pfd, ctx->num_listening_sockets + ctrlidx, MASTER_POLL_TIMEOUT_MS) > 0) {
 			for (i = 0; i < ctx->num_listening_sockets; i++) {
 				/* NOTE(lsm): on QNX, poll() returns POLLRDNORM after the
 				 * successful poll, and POLLIN is defined as
@@ -15961,6 +16007,13 @@ master_thread_run(void *thread_func_param)
 				if ((ctx->stop_flag == 0) && (pfd[i].revents & POLLIN)) {
 					accept_new_connection(&ctx->listening_sockets[i], ctx);
 				}
+			}
+
+			if (ctrlidx && (pfd[i].revents & POLLIN) && (pfd[i].fd == ctx->listen_ctrl_sd)) {
+				int rcvd = 0 ;
+				/* At this time not interested in what is recvd,
+				   but rather a way to wake up from poll */
+				recv(ctx->listen_ctrl_sd,(char *)&rcvd,sizeof(rcvd),0);
 			}
 		}
 	}
@@ -16154,12 +16207,32 @@ mg_stop(struct mg_context *ctx)
 	/* Set stop flag, so all threads know they have to exit. */
 	ctx->stop_flag = 1;
 
+	if (ctx->listen_ctrl_sd > 0) {
+		struct sockaddr_in to;
+		int l = sizeof(to);
+		memset(&to, 0, sizeof(to));
+                /* get listen_ctrl_sd bound tuple address using getsockname() */
+		if (!getsockname(ctx->listen_ctrl_sd, (struct sockaddr*)&to, &l)) {
+			int d = MAIN_THREAD_STOP_MSG ;
+		/* Not interested in errors of sendto, as this is just one time 
+		   attempt to wake master listen thread from timed poll i/o wait. */
+			sendto(ctx->listen_ctrl_sd, (char *)&d, sizeof(d), 0, 
+                               (struct sockaddr *) &to, sizeof(struct sockaddr_in));
+		}
+	}
+
 	/* Wait until everything has stopped. */
 	while (ctx->stop_flag != 2) {
 		(void)mg_sleep(10);
 	}
 
 	mg_join_thread(mt);
+
+	if (ctx && (ctx->listen_ctrl_sd > 0)) {
+		close(ctx->listen_ctrl_sd);
+		ctx->listen_ctrl_sd = INVALID_SOCKET ;
+	}
+
 	free_context(ctx);
 
 #if defined(_WIN32) && !defined(__SYMBIAN32__)
@@ -16413,6 +16486,32 @@ mg_start(const struct mg_callbacks *callbacks,
 	    !set_uid_option(ctx) ||
 #endif
 	    !set_acl_option(ctx)) {
+		free_context(ctx);
+		pthread_setspecific(sTlsKey, NULL);
+		return NULL;
+	}
+
+	/* listen_ctrl_sd is used by mg_stop to make master thread
+	   break out safely from i/o wait in poll instead of relying on 
+	   frequent poll timeout to wake up and check the stop flag.
+	*/
+	ctx->listen_ctrl_sd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (ctx->listen_ctrl_sd > 0) {
+		struct sockaddr_in saddr;
+		memset(&saddr, 0, sizeof(saddr));
+		saddr.sin_family = AF_INET;
+		saddr.sin_port = htons(0);
+		saddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	        set_blocking_mode(ctx->listen_ctrl_sd, 0);
+		if (bind(ctx->listen_ctrl_sd, (struct sockaddr *)&saddr,
+                                                   sizeof(saddr)) < 0) {
+			close(ctx->listen_ctrl_sd);
+			ctx->listen_ctrl_sd = INVALID_SOCKET ;
+		}
+	}
+        /* The following check and return is not mandatory */
+	if (ctx->listen_ctrl_sd < 0) {
+		mg_cry(fc(ctx), "failed to setup listen_ctrl_sd");
 		free_context(ctx);
 		pthread_setspecific(sTlsKey, NULL);
 		return NULL;
